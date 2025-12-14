@@ -56,7 +56,6 @@ async function fetchWithTimeout(
   }
 }
 
-// LLM 分析（增强错误日志）
 async function analyzeWithLLM(
   data: Record<string, unknown>,
   ip: string
@@ -76,7 +75,7 @@ IP: ${ip}
 3. 适用场景建议`;
 
   try {
-    console.log(`[LLM] 调用 API: ${LLM_BASE_URL}/chat/completions`);
+    console.log(`[LLM] 调用 API: ${LLM_BASE_URL}/chat/completions, Model: ${LLM_MODEL}`);
     const response = await fetch(`${LLM_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
@@ -129,25 +128,34 @@ export class IPQualityService {
   async check(ip: string): Promise<IPQualityResult> {
     const cacheKey = `ip-quality:${ip}`;
     const cached = cacheGet(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      console.log(`[IPQuality] 使用缓存数据: ${ip}`);
+      return cached;
+    }
 
     console.log(`[IPQuality] 开始检测 IP: ${ip}`);
+    console.log(`[IPQuality] 环境变量状态: IPQS=${Boolean(IPQS_KEY)}, ABUSEIPDB=${Boolean(ABUSEIPDB_KEY)}, IP2LOCATION=${Boolean(IP2LOCATION_KEY)}, IPDATA=${Boolean(IPDATA_KEY)}, CF=${Boolean(CLOUDFLARE_API_TOKEN)}`);
 
     const apis = this.buildApis(ip);
     const { regularApis, asnDependentApis } = this.partitionApis(apis);
+
+    console.log(`[IPQuality] 启用的常规 API: ${regularApis.map(a => a.name).join(', ')}`);
 
     const phase1Results = await this.callApis(regularApis);
     const merged = this.mergeResults(phase1Results);
 
     const asn = (merged.asn || merged.ASN || merged.as) as string | undefined;
-    console.log(`[IPQuality] 获取到 ASN: ${asn}`);
+    console.log(`[IPQuality] 获取到 ASN: ${asn || '未获取到'}`);
     
     if (asn && asnDependentApis.length > 0) {
+      console.log(`[IPQuality] 启用的 ASN 相关 API: ${asnDependentApis.map(a => a.name).join(', ')}`);
       const asnResults = await this.callApis(asnDependentApis, asn);
       phase1Results.push(...asnResults);
     }
 
     const mergedResult = this.mergeResults(phase1Results);
+    console.log(`[IPQuality] 合并后的数据源: ${mergedResult.sources}`);
+    
     const enhancedResult = await this.enhanceResult(mergedResult, ip);
 
     cacheSet(cacheKey, enhancedResult as IPQualityResult, 900);
@@ -164,7 +172,7 @@ export class IPQualityService {
       },
       {
         name: "ipapi",
-        url: `https://ipwho.is/${ip}`,  // ✅ 修复端点
+        url: `https://ipwho.is/${ip}`,
         enabled: true,
         transform: (d) => this.transformIPApi(d),
       },
@@ -220,13 +228,14 @@ export class IPQualityService {
           });
           
           if (!response.ok) {
-            console.error(`[IPQuality] ${api.name} 返回 ${response.status}`);
+            const errorText = await response.text();
+            console.error(`[IPQuality] ${api.name} 返回 ${response.status}: ${errorText.substring(0, 200)}`);
             throw new Error(`HTTP ${response.status}`);
           }
           
           const data = await response.json() as Record<string, unknown>;
           const transformed = api.transform(data);
-          console.log(`[IPQuality] ${api.name} 成功`);
+          console.log(`[IPQuality] ${api.name} 成功，返回字段: ${Object.keys(transformed).join(', ')}`);
           
           return { source: api.name, data: transformed };
         } catch (error) {
@@ -247,7 +256,7 @@ export class IPQualityService {
     const sources: string[] = [];
     const merged: Record<string, unknown> = {};
     
-    // 对于 boolean 字段使用 OR 逻辑
+    // 对于 boolean 字段使用 OR 逻辑（任何一个为 true 则为 true）
     const booleanFields = ['isVpn', 'isProxy', 'isTor', 'isHosting', 'isMobile'];
     
     results.forEach(result => {
@@ -255,11 +264,12 @@ export class IPQualityService {
       
       Object.entries(result.data).forEach(([key, value]) => {
         if (booleanFields.includes(key)) {
-          // Boolean 字段：任何一个为 true 则为 true
           merged[key] = merged[key] === true || value === true;
         } else {
-          // 其他字段：后面的值覆盖前面的（保留原逻辑）
-          merged[key] = value;
+          // 其他字段：后面的值覆盖前面的（除非当前值为 null/undefined）
+          if (value !== null && value !== undefined) {
+            merged[key] = value;
+          }
         }
       });
     });
@@ -298,11 +308,44 @@ export class IPQualityService {
     return data.isp && data.org && data.isp !== data.org;
   }
 
-  private determineIPType(data: Record<string, unknown>) {
-    if (data.connection_type) return data.connection_type as string;
-    if (data.usageType) return data.usageType as string;
-    if (data.isHosting) return "Data Center";
-    if (data.isMobile) return "Mobile";
+  private determineIPType(data: Record<string, unknown>): string {
+    // 优先使用明确的类型信息（避免 "Premium required."）
+    
+    // 1. 优先使用 AbuseIPDB 的 usageType（最详细）
+    if (data.usageType && typeof data.usageType === 'string' && !data.usageType.includes('Premium')) {
+      return data.usageType as string;
+    }
+    
+    // 2. 使用 IP2Location 的 usageType
+    if (data.ip2location_usage_type && typeof data.ip2location_usage_type === 'string') {
+      return data.ip2location_usage_type as string;
+    }
+    
+    // 3. 使用 IPData 的 ASN type
+    if (data.asn_type && typeof data.asn_type === 'string') {
+      const asnType = data.asn_type as string;
+      // 转换为友好的名称
+      const typeMap: Record<string, string> = {
+        'hosting': 'Data Center/Hosting',
+        'isp': 'ISP/Residential',
+        'business': 'Business',
+        'education': 'Education/Research',
+      };
+      return typeMap[asnType.toLowerCase()] || asnType;
+    }
+    
+    // 4. 使用 IPQS 的 connection_type（如果不是 Premium required）
+    if (data.connection_type && typeof data.connection_type === 'string' && !data.connection_type.includes('Premium')) {
+      return data.connection_type as string;
+    }
+    
+    // 5. 根据 boolean 标记判断
+    if (data.isHosting === true) return "Data Center/Hosting";
+    if (data.isMobile === true) return "Mobile";
+    if (data.isVpn === true || data.isProxy === true) return "VPN/Proxy";
+    if (data.isTor === true) return "Tor Exit Node";
+    
+    // 6. 默认值
     return "Residential";
   }
 
@@ -312,9 +355,13 @@ export class IPQualityService {
       isVpn: d.vpn,
       isProxy: d.proxy,
       isTor: d.tor,
-      isHosting: Boolean(d.host),  // ✅ 修复类型转换
+      isHosting: Boolean(d.host),
       isMobile: d.mobile,
       connection_type: d.connection_type,
+      isp: d.ISP,
+      org: d.organization,
+      asn: d.ASN,
+      ASN: d.ASN,
     };
   }
 
@@ -337,19 +384,23 @@ export class IPQualityService {
       abuseScore: data.abuseConfidenceScore,
       totalReports: data.totalReports,
       isWhitelisted: data.isWhitelisted,
+      usageType: data.usageType, // 添加 usageType
+      isp: data.isp,
+      domain: data.domain,
     };
   }
 
   private transformIP2Location(d: Record<string, unknown>) {
     return {
       ip2location_country_code: d.country_code,
-      usageType: d.usage_type,
+      ip2location_usage_type: d.usage_type, // 重命名避免覆盖
       isProxy: d.is_proxy,
     };
   }
 
   private transformIPData(d: Record<string, unknown>) {
     const threat = (d.threat || {}) as Record<string, unknown>;
+    const asn = (d.asn || {}) as Record<string, unknown>;
     return {
       isTor: threat.is_tor,
       isProxy: threat.is_proxy,
@@ -357,12 +408,19 @@ export class IPQualityService {
       isKnownAbuser: threat.is_known_abuser,
       isKnownAttacker: threat.is_known_attacker,
       isThreat: threat.is_threat,
+      asn_type: asn.type, // 添加 ASN type
     };
   }
 
   private transformCloudflare(d: Record<string, unknown>) {
+    console.log(`[IPQuality] Cloudflare 原始响应:`, JSON.stringify(d).substring(0, 500));
     const result = (d.result || {}) as Record<string, unknown>;
     const summary = (result.summary_0 || result.summary || {}) as Record<string, unknown>;
+    
+    if (!summary.bot && !summary.human) {
+      console.warn(`[IPQuality] Cloudflare 未返回 bot/human 数据，完整响应:`, JSON.stringify(d));
+    }
+    
     return {
       cf_asn_bot_pct: summary.bot,
       cf_asn_human_pct: summary.human,
@@ -372,7 +430,12 @@ export class IPQualityService {
 
   private buildCloudflareURL(asn: string) {
     const match = asn.toString().match(/\d+/);
-    if (!match) throw new Error(`Invalid ASN format: ${asn}`);
-    return `https://api.cloudflare.com/client/v4/radar/http/summary/bot_class?asn=${match[0]}&dateRange=7d&format=json`;
+    if (!match) {
+      console.error(`[IPQuality] 无效的 ASN 格式: ${asn}`);
+      throw new Error(`Invalid ASN format: ${asn}`);
+    }
+    const url = `https://api.cloudflare.com/client/v4/radar/http/summary/bot_class?asn=${match[0]}&dateRange=7d&format=json`;
+    console.log(`[IPQuality] Cloudflare URL: ${url}`);
+    return url;
   }
 }
