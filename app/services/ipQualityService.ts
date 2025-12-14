@@ -65,14 +65,25 @@ async function analyzeWithLLM(
     return { reasoning: "" };
   }
 
-  const prompt = `分析以下 IP 质量数据，给出专业的风险评估报告：
-IP: ${ip}
-数据: ${JSON.stringify(data, null, 2)}
+  const prompt = `Analyze the following IP quality data and provide a professional risk assessment report:
 
-请用中文输出，包含：
-1. IP 类型判断
-2. 风险等级评估
-3. 适用场景建议`;
+IP: ${ip}
+Key Metrics:
+- Fraud Score: ${data.fraudScore || 'N/A'}
+- Abuse Score: ${data.abuseScore || 'N/A'}
+- IP Type: ${data.ipType || 'N/A'}
+- VPN: ${data.isVpn || false}, Proxy: ${data.isProxy || false}, Tor: ${data.isTor || false}
+- Hosting/Datacenter: ${data.isHosting || false}
+- ASN Bot Traffic: ${data.cf_asn_bot_pct ? Number(data.cf_asn_bot_pct).toFixed(1) + '%' : 'N/A'}
+- ISP: ${data.isp || 'N/A'}
+- Country: ${data.countryCode || 'N/A'}
+
+Please provide in Chinese (必须用中文回复):
+1. IP类型判断和网络特征分析
+2. 风险等级评估（低风险/中等风险/高风险）
+3. 建议的使用场景和注意事项
+
+Keep response concise, around 200-400 words.`;
 
   try {
     console.log(`[LLM] 调用 API: ${LLM_BASE_URL}/chat/completions, Model: ${LLM_MODEL}`);
@@ -85,7 +96,8 @@ IP: ${ip}
       body: JSON.stringify({
         model: LLM_MODEL,
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 1000,
+        max_tokens: 2000,
+        temperature: 0.7,
       }),
     });
 
@@ -95,9 +107,21 @@ IP: ${ip}
       return { reasoning: "" };
     }
 
-    const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const result = await response.json() as { 
+      choices?: Array<{ 
+        message?: { content?: string }; 
+        finish_reason?: string 
+      }> 
+    };
     const reasoning = result.choices?.[0]?.message?.content || "";
-    console.log(`[LLM] 分析成功，长度: ${reasoning.length}`);
+    const finishReason = result.choices?.[0]?.finish_reason;
+    
+    console.log(`[LLM] 分析完成，长度: ${reasoning.length}, finish_reason: ${finishReason}`);
+    
+    if (reasoning.length === 0) {
+      console.warn(`[LLM] 返回内容为空，完整响应:`, JSON.stringify(result));
+    }
+    
     return { reasoning };
   } catch (error) {
     console.error(`[LLM] 调用失败:`, error);
@@ -384,7 +408,7 @@ export class IPQualityService {
       abuseScore: data.abuseConfidenceScore,
       totalReports: data.totalReports,
       isWhitelisted: data.isWhitelisted,
-      usageType: data.usageType, // 添加 usageType
+      usageType: data.usageType,
       isp: data.isp,
       domain: data.domain,
     };
@@ -393,7 +417,7 @@ export class IPQualityService {
   private transformIP2Location(d: Record<string, unknown>) {
     return {
       ip2location_country_code: d.country_code,
-      ip2location_usage_type: d.usage_type, // 重命名避免覆盖
+      ip2location_usage_type: d.usage_type,
       isProxy: d.is_proxy,
     };
   }
@@ -408,7 +432,7 @@ export class IPQualityService {
       isKnownAbuser: threat.is_known_abuser,
       isKnownAttacker: threat.is_known_attacker,
       isThreat: threat.is_threat,
-      asn_type: asn.type, // 添加 ASN type
+      asn_type: asn.type,
     };
   }
 
