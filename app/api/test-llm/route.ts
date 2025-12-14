@@ -19,7 +19,8 @@ export async function GET() {
     const response = await fetch(`${LLM_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json; charset=utf-8",
         Authorization: `Bearer ${LLM_API_KEY}`,
       },
       body: JSON.stringify({
@@ -29,7 +30,11 @@ export async function GET() {
       }),
     });
 
-    const data = await response.json();
+    // ✅ 修复编码问题
+    const arrayBuffer = await response.arrayBuffer();
+    const decoder = new TextDecoder('utf-8');
+    const text = decoder.decode(arrayBuffer);
+    const data = JSON.parse(text);
 
     if (!response.ok) {
       return NextResponse.json({
