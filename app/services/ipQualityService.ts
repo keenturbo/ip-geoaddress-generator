@@ -90,7 +90,8 @@ Keep response concise, around 200-400 words.`;
     const response = await fetch(`${LLM_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json; charset=utf-8",
         Authorization: `Bearer ${LLM_API_KEY}`,
       },
       body: JSON.stringify({
@@ -102,17 +103,25 @@ Keep response concise, around 200-400 words.`;
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      // ✅ 错误信息也需要正确解码
+      const arrayBuffer = await response.arrayBuffer();
+      const decoder = new TextDecoder('utf-8');
+      const errorText = decoder.decode(arrayBuffer);
       console.error(`[LLM] API 返回错误 ${response.status}: ${errorText}`);
       return { reasoning: "" };
     }
 
-    const result = await response.json() as { 
+    // ✅ 手动使用 UTF-8 解码
+    const arrayBuffer = await response.arrayBuffer();
+    const decoder = new TextDecoder('utf-8');
+    const text = decoder.decode(arrayBuffer);
+    const result = JSON.parse(text) as { 
       choices?: Array<{ 
         message?: { content?: string }; 
         finish_reason?: string 
       }> 
     };
+    
     const reasoning = result.choices?.[0]?.message?.content || "";
     const finishReason = result.choices?.[0]?.finish_reason;
     
