@@ -56,6 +56,7 @@ async function fetchWithTimeout(
   }
 }
 
+// ✅ 重写：使用高级 Prompt 的 LLM 分析函数
 async function analyzeWithLLM(
   data: Record<string, unknown>,
   ip: string
@@ -65,41 +66,81 @@ async function analyzeWithLLM(
     return { reasoning: "" };
   }
 
-  const prompt = `Analyze the following IP quality data and provide a professional risk assessment report:
+  // 1. 定义系统提示词（专家角色与评分标准）
+  const systemPrompt = `
+# IP Quality Analysis Expert
 
+你是一个专业的IP质量分析专家，负责根据用户提供的IP检测数据，综合分析IP的质量情况并给出使用建议。
+
+## 分析维度与评分标准
+
+### 1.‌ 基础属性
+- **IP类型**：ISP/Residential (最优) > Mobile (优秀) > Business (良好) > Data Center/Hosting (一般)
+- **原生/广播**：Native (原生) 优于 Broadcast (广播)
+- **双ISP**：一致 (非双ISP) 优于 不一致 (双ISP)
+
+### 2.‌ 风控评估（按权重排序）
+
+#### 高权重指标 (一票否决)
+- **IP2Location Proxy**: 若为 "Yes" 或 Usage Type 为 "VPN/TOR"，直接判定为高风险。
+- **IPData Threats**: 若包含 abuse/tor/proxy，判定为高风险。
+- **Cloudflare Radar**: Bot Score > 50 表示所在 ASN 及其自动化，需警惕。
+
+#### 中权重指标
+- **IPQS Fraud Score**: 75+ (可疑), 85+ (风险), 90+ (高风险)。
+- **AbuseIPDB Score**: >0 即有黑历史，分数越高越危险。
+
+### 3.‌ 输出要求
+请直接输出 Markdown 格式的报告，不要包含 JSON 包装。报告结构如下：
+
+## IP质量分析报告
+
+### 🎯 综合评分：X/100 (根据风险扣分，初始100)
+
+### 📊 核心指标评估
+| 维度 | 状态 | 详细说明 |
+|------|------|----------|
+| IP类型 | ✅/⚠️/❌ | [类型] ([原生/广播]) |
+| 欺诈风险 | ✅/⚠️/❌ | IPQS: [分数] |
+| 威胁标记 | ✅/⚠️/❌ | [VPN/Proxy/Tor状态] |
+| 滥用记录 | ✅/⚠️/❌ | AbuseIPDB: [分数] |
+| 邻里环境 | ✅/⚠️/❌ | ASN Bot流量: [比例]% |
+
+### 💡 深度分析
+[针对 IP 类型、原生性、ASN 风险的详细解读，100字左右]
+
+### ✅ 适用场景建议
+- **推荐**：[列出适合的场景，如流媒体、游戏、注册等]
+- **慎用**：[列出不适合的场景]
+`;
+
+  // 2. 组装用户数据
+  const userPrompt = `
+Analyze the following IP data:
 IP: ${ip}
+ISP: ${data.isp || 'Unknown'}
+ASN: ${data.asn || data.ASN || 'Unknown'}
+IP Type: ${data.ipType || 'Unknown'}
+Country: ${data.country || data.countryCode || 'Unknown'}
 
-=== IP 本身的风险指标 ===
-- Fraud Score: ${data.fraudScore ?? 'N/A'} (0-100, 越高越危险)
-- Abuse Score: ${data.abuseScore ?? 'N/A'} (0-100, 越高越危险)
-- VPN: ${data.isVpn || false}
-- Proxy: ${data.isProxy || false}
-- Tor: ${data.isTor || false}
-- Hosting/Datacenter: ${data.isHosting || false}
+Risk Data:
+- Fraud Score (IPQS): ${data.fraudScore ?? 'N/A'}
+- Abuse Score (AbuseIPDB): ${data.abuseScore ?? 'N/A'}
+- IPData Threats: ${data.isThreat ? 'Detected' : 'None'}
+- VPN: ${data.isVpn ? 'Yes' : 'No'}
+- Proxy: ${data.isProxy ? 'Yes' : 'No'}
+- Tor: ${data.isTor ? 'Yes' : 'No'}
+- Hosting: ${data.isHosting ? 'Yes' : 'No'}
 
-=== ASN 整体风险（不代表此 IP 本身） ===
-- ASN Bot Traffic: ${data.cf_asn_bot_pct ? Number(data.cf_asn_bot_pct).toFixed(1) + '%' : 'N/A'}
-- 注意：ASN Bot 流量高只表示该网络整体有较多自动化流量，不代表此 IP 本身有问题
+Inferred Data:
+- Native/Broadcast: ${data.isNative ? 'Native IP' : 'Broadcast IP'}
+- Dual ISP: ${data.isDualIsp ? 'Yes' : 'No'}
 
-=== 网络信息 ===
-- IP Type: ${data.ipType || 'N/A'}
-- ISP: ${data.isp || 'N/A'}
-- Country: ${data.countryCode || 'N/A'}
+Additional Data:
+- Cloudflare ASN Bot Traffic: ${data.cf_asn_bot_pct ? Number(data.cf_asn_bot_pct).toFixed(1) + '%' : 'N/A'}
+- ASN Bot Risk: ${data.cf_asn_likely_bot ? 'HIGH (>50% bot traffic)' : 'LOW'}
 
-请用中文回复，包含以下内容：
-
-1. **IP类型判断**：分析该 IP 的网络特征
-
-2. **风险等级评估**：
-   - IP 本身风险：基于欺诈评分、滥用评分、VPN/代理/Tor 标记
-   - ASN 整体风险：基于 Bot 流量占比（仅供参考，不代表此 IP）
-   - 综合评估：给出最终风险等级（低/中/高）
-
-3. **使用建议**：根据风险等级给出具体建议
-
-重要：如果欺诈评分和滥用评分都很低（<25），即使 ASN Bot 流量高，IP 本身风险也应评为低风险。ASN 数据仅作为参考。
-
-保持回复简洁，200-400字。`;
+请根据 System Prompt 的标准生成中文报告。`;
 
   try {
     console.log(`[LLM] 调用 API: ${LLM_BASE_URL}/chat/completions, Model: ${LLM_MODEL}`);
@@ -112,14 +153,17 @@ IP: ${ip}
       },
       body: JSON.stringify({
         model: LLM_MODEL,
-        messages: [{ role: "user", content: prompt }],
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
         max_tokens: 2000,
-        temperature: 0.7,
+        temperature: 0.3, // 降低随机性，使分析更严谨
       }),
     });
 
     if (!response.ok) {
-      // ✅ 错误信息也需要正确解码
+      // 错误信息解码
       const arrayBuffer = await response.arrayBuffer();
       const decoder = new TextDecoder('utf-8');
       const errorText = decoder.decode(arrayBuffer);
@@ -127,7 +171,7 @@ IP: ${ip}
       return { reasoning: "" };
     }
 
-    // ✅ 手动使用 UTF-8 解码
+    // 正确解码响应
     const arrayBuffer = await response.arrayBuffer();
     const decoder = new TextDecoder('utf-8');
     const text = decoder.decode(arrayBuffer);
@@ -139,14 +183,8 @@ IP: ${ip}
     };
     
     const reasoning = result.choices?.[0]?.message?.content || "";
-    const finishReason = result.choices?.[0]?.finish_reason;
     
-    console.log(`[LLM] 分析完成，长度: ${reasoning.length}, finish_reason: ${finishReason}`);
-    
-    if (reasoning.length === 0) {
-      console.warn(`[LLM] 返回内容为空，完整响应:`, JSON.stringify(result));
-    }
-    
+    console.log(`[LLM] 分析完成，长度: ${reasoning.length}`);
     return { reasoning };
   } catch (error) {
     console.error(`[LLM] 调用失败:`, error);
@@ -183,12 +221,9 @@ export class IPQualityService {
     }
 
     console.log(`[IPQuality] 开始检测 IP: ${ip}`);
-    console.log(`[IPQuality] 环境变量状态: IPQS=${Boolean(IPQS_KEY)}, ABUSEIPDB=${Boolean(ABUSEIPDB_KEY)}, IP2LOCATION=${Boolean(IP2LOCATION_KEY)}, IPDATA=${Boolean(IPDATA_KEY)}, CF=${Boolean(CLOUDFLARE_API_TOKEN)}`);
-
+    
     const apis = this.buildApis(ip);
     const { regularApis, asnDependentApis } = this.partitionApis(apis);
-
-    console.log(`[IPQuality] 启用的常规 API: ${regularApis.map(a => a.name).join(', ')}`);
 
     const phase1Results = await this.callApis(regularApis);
     const merged = this.mergeResults(phase1Results);
@@ -197,14 +232,11 @@ export class IPQualityService {
     console.log(`[IPQuality] 获取到 ASN: ${asn || '未获取到'}`);
     
     if (asn && asnDependentApis.length > 0) {
-      console.log(`[IPQuality] 启用的 ASN 相关 API: ${asnDependentApis.map(a => a.name).join(', ')}`);
       const asnResults = await this.callApis(asnDependentApis, asn);
       phase1Results.push(...asnResults);
     }
 
     const mergedResult = this.mergeResults(phase1Results);
-    console.log(`[IPQuality] 合并后的数据源: ${mergedResult.sources}`);
-    
     const enhancedResult = await this.enhanceResult(mergedResult, ip);
 
     cacheSet(cacheKey, enhancedResult as IPQualityResult, 900);
@@ -269,24 +301,17 @@ export class IPQualityService {
       apis.map(async (api) => {
         try {
           const url = api.requiresASN && api.buildUrl ? api.buildUrl(asn!) : api.url!;
-          console.log(`[IPQuality] 调用 ${api.name}: ${url}`);
-          
           const response = await fetchWithTimeout(url, API_TIMEOUT, {
             headers: api.headers,
             params: api.params,
           });
           
           if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`[IPQuality] ${api.name} 返回 ${response.status}: ${errorText.substring(0, 200)}`);
             throw new Error(`HTTP ${response.status}`);
           }
           
           const data = await response.json() as Record<string, unknown>;
-          const transformed = api.transform(data);
-          console.log(`[IPQuality] ${api.name} 成功，返回字段: ${Object.keys(transformed).join(', ')}`);
-          
-          return { source: api.name, data: transformed };
+          return { source: api.name, data: api.transform(data) };
         } catch (error) {
           console.error(`[IPQuality] ${api.name} 失败:`, error);
           throw error;
@@ -304,18 +329,14 @@ export class IPQualityService {
   private mergeResults(results: Array<{ source: string; data: Record<string, unknown> }>): MergedResult {
     const sources: string[] = [];
     const merged: Record<string, unknown> = {};
-    
-    // 对于 boolean 字段使用 OR 逻辑（任何一个为 true 则为 true）
     const booleanFields = ['isVpn', 'isProxy', 'isTor', 'isHosting', 'isMobile'];
     
     results.forEach(result => {
       sources.push(result.source);
-      
       Object.entries(result.data).forEach(([key, value]) => {
         if (booleanFields.includes(key)) {
           merged[key] = merged[key] === true || value === true;
         } else {
-          // 其他字段：后面的值覆盖前面的（除非当前值为 null/undefined）
           if (value !== null && value !== undefined) {
             merged[key] = value;
           }
@@ -358,22 +379,14 @@ export class IPQualityService {
   }
 
   private determineIPType(data: Record<string, unknown>): string {
-    // 优先使用明确的类型信息（避免 "Premium required."）
-    
-    // 1. 优先使用 AbuseIPDB 的 usageType（最详细）
     if (data.usageType && typeof data.usageType === 'string' && !data.usageType.includes('Premium')) {
       return data.usageType as string;
     }
-    
-    // 2. 使用 IP2Location 的 usageType
     if (data.ip2location_usage_type && typeof data.ip2location_usage_type === 'string') {
       return data.ip2location_usage_type as string;
     }
-    
-    // 3. 使用 IPData 的 ASN type
     if (data.asn_type && typeof data.asn_type === 'string') {
       const asnType = data.asn_type as string;
-      // 转换为友好的名称
       const typeMap: Record<string, string> = {
         'hosting': 'Data Center/Hosting',
         'isp': 'ISP/Residential',
@@ -382,19 +395,13 @@ export class IPQualityService {
       };
       return typeMap[asnType.toLowerCase()] || asnType;
     }
-    
-    // 4. 使用 IPQS 的 connection_type（如果不是 Premium required）
     if (data.connection_type && typeof data.connection_type === 'string' && !data.connection_type.includes('Premium')) {
       return data.connection_type as string;
     }
-    
-    // 5. 根据 boolean 标记判断
     if (data.isHosting === true) return "Data Center/Hosting";
     if (data.isMobile === true) return "Mobile";
     if (data.isVpn === true || data.isProxy === true) return "VPN/Proxy";
     if (data.isTor === true) return "Tor Exit Node";
-    
-    // 6. 默认值
     return "Residential";
   }
 
@@ -462,14 +469,8 @@ export class IPQualityService {
   }
 
   private transformCloudflare(d: Record<string, unknown>) {
-    console.log(`[IPQuality] Cloudflare 原始响应:`, JSON.stringify(d).substring(0, 500));
     const result = (d.result || {}) as Record<string, unknown>;
     const summary = (result.summary_0 || result.summary || {}) as Record<string, unknown>;
-    
-    if (!summary.bot && !summary.human) {
-      console.warn(`[IPQuality] Cloudflare 未返回 bot/human 数据，完整响应:`, JSON.stringify(d));
-    }
-    
     return {
       cf_asn_bot_pct: summary.bot,
       cf_asn_human_pct: summary.human,
@@ -479,12 +480,7 @@ export class IPQualityService {
 
   private buildCloudflareURL(asn: string) {
     const match = asn.toString().match(/\d+/);
-    if (!match) {
-      console.error(`[IPQuality] 无效的 ASN 格式: ${asn}`);
-      throw new Error(`Invalid ASN format: ${asn}`);
-    }
-    const url = `https://api.cloudflare.com/client/v4/radar/http/summary/bot_class?asn=${match[0]}&dateRange=7d&format=json`;
-    console.log(`[IPQuality] Cloudflare URL: ${url}`);
-    return url;
+    if (!match) throw new Error(`Invalid ASN format: ${asn}`);
+    return `https://api.cloudflare.com/client/v4/radar/http/summary/bot_class?asn=${match[0]}&dateRange=7d&format=json`;
   }
 }
