@@ -12,7 +12,6 @@ const LLM_MODEL = process.env.LLM_MODEL || "gpt-3.5-turbo";
 
 // ============ 内联工具函数 ============
 
-// 内存缓存（Cloudflare Pages 无 Redis，后续可切 KV）
 const cache = new Map<string, { data: IPQualityResult; expires: number }>();
 
 function cacheGet(key: string): IPQualityResult | null {
@@ -29,7 +28,6 @@ function cacheSet(key: string, data: IPQualityResult, ttlSeconds: number): void 
   cache.set(key, { data, expires: Date.now() + ttlSeconds * 1000 });
 }
 
-// 带超时的 fetch
 async function fetchWithTimeout(
   url: string,
   timeoutMs: number,
@@ -58,12 +56,13 @@ async function fetchWithTimeout(
   }
 }
 
-// LLM 分析（可选）
+// LLM 分析（增强错误日志）
 async function analyzeWithLLM(
   data: Record<string, unknown>,
   ip: string
 ): Promise<{ reasoning: string }> {
   if (!LLM_API_KEY || !LLM_BASE_URL) {
+    console.log("[LLM] 未配置 API Key 或 Base URL");
     return { reasoning: "" };
   }
 
@@ -77,6 +76,7 @@ IP: ${ip}
 3. 适用场景建议`;
 
   try {
+    console.log(`[LLM] 调用 API: ${LLM_BASE_URL}/chat/completions`);
     const response = await fetch(`${LLM_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
@@ -91,12 +91,17 @@ IP: ${ip}
     });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[LLM] API 返回错误 ${response.status}: ${errorText}`);
       return { reasoning: "" };
     }
 
     const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    return { reasoning: result.choices?.[0]?.message?.content || "" };
-  } catch {
+    const reasoning = result.choices?.[0]?.message?.content || "";
+    console.log(`[LLM] 分析成功，长度: ${reasoning.length}`);
+    return { reasoning };
+  } catch (error) {
+    console.error(`[LLM] 调用失败:`, error);
     return { reasoning: "" };
   }
 }
@@ -126,6 +131,8 @@ export class IPQualityService {
     const cached = cacheGet(cacheKey);
     if (cached) return cached;
 
+    console.log(`[IPQuality] 开始检测 IP: ${ip}`);
+
     const apis = this.buildApis(ip);
     const { regularApis, asnDependentApis } = this.partitionApis(apis);
 
@@ -133,6 +140,8 @@ export class IPQualityService {
     const merged = this.mergeResults(phase1Results);
 
     const asn = (merged.asn || merged.ASN || merged.as) as string | undefined;
+    console.log(`[IPQuality] 获取到 ASN: ${asn}`);
+    
     if (asn && asnDependentApis.length > 0) {
       const asnResults = await this.callApis(asnDependentApis, asn);
       phase1Results.push(...asnResults);
@@ -155,7 +164,7 @@ export class IPQualityService {
       },
       {
         name: "ipapi",
-        url: `https://ip-api.io/${ip}`,
+        url: `https://ipwho.is/${ip}`,  // ✅ 修复端点
         enabled: true,
         transform: (d) => this.transformIPApi(d),
       },
@@ -201,13 +210,29 @@ export class IPQualityService {
   private async callApis(apis: ApiConfig[], asn?: string) {
     const results = await Promise.allSettled(
       apis.map(async (api) => {
-        const url = api.requiresASN && api.buildUrl ? api.buildUrl(asn!) : api.url!;
-        const response = await fetchWithTimeout(url, API_TIMEOUT, {
-          headers: api.headers,
-          params: api.params,
-        });
-        const data = await response.json() as Record<string, unknown>;
-        return { source: api.name, data: api.transform(data) };
+        try {
+          const url = api.requiresASN && api.buildUrl ? api.buildUrl(asn!) : api.url!;
+          console.log(`[IPQuality] 调用 ${api.name}: ${url}`);
+          
+          const response = await fetchWithTimeout(url, API_TIMEOUT, {
+            headers: api.headers,
+            params: api.params,
+          });
+          
+          if (!response.ok) {
+            console.error(`[IPQuality] ${api.name} 返回 ${response.status}`);
+            throw new Error(`HTTP ${response.status}`);
+          }
+          
+          const data = await response.json() as Record<string, unknown>;
+          const transformed = api.transform(data);
+          console.log(`[IPQuality] ${api.name} 成功`);
+          
+          return { source: api.name, data: transformed };
+        } catch (error) {
+          console.error(`[IPQuality] ${api.name} 失败:`, error);
+          throw error;
+        }
       })
     );
 
@@ -220,10 +245,25 @@ export class IPQualityService {
 
   private mergeResults(results: Array<{ source: string; data: Record<string, unknown> }>): MergedResult {
     const sources: string[] = [];
-    const merged = results.reduce((acc, result) => {
+    const merged: Record<string, unknown> = {};
+    
+    // 对于 boolean 字段使用 OR 逻辑
+    const booleanFields = ['isVpn', 'isProxy', 'isTor', 'isHosting', 'isMobile'];
+    
+    results.forEach(result => {
       sources.push(result.source);
-      return { ...acc, ...result.data };
-    }, {} as Record<string, unknown>);
+      
+      Object.entries(result.data).forEach(([key, value]) => {
+        if (booleanFields.includes(key)) {
+          // Boolean 字段：任何一个为 true 则为 true
+          merged[key] = merged[key] === true || value === true;
+        } else {
+          // 其他字段：后面的值覆盖前面的（保留原逻辑）
+          merged[key] = value;
+        }
+      });
+    });
+    
     return { ...merged, sources };
   }
 
@@ -272,7 +312,7 @@ export class IPQualityService {
       isVpn: d.vpn,
       isProxy: d.proxy,
       isTor: d.tor,
-      isHosting: d.host,
+      isHosting: Boolean(d.host),  // ✅ 修复类型转换
       isMobile: d.mobile,
       connection_type: d.connection_type,
     };
@@ -284,7 +324,7 @@ export class IPQualityService {
       country: d.country_name,
       city: d.city,
       isp: d.isp,
-      org: d.organisation,
+      org: d.organisation || d.org,
       asn: d.asn,
       ASN: d.asn,
       as: d.asn,
