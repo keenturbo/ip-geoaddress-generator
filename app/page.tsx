@@ -26,6 +26,9 @@ import { ipSignal } from "@/signals/ipSignal";
 import { addressSignal, coordinatesSignal } from "@/signals/addressSignal";
 import { qualitySignal } from "@/signals/qualitySignal";
 
+// ✅ 新增：导入 react-markdown
+import ReactMarkdown from "react-markdown";
+
 export default function Home() {
   const {
     isLoading: addressLoading,
@@ -366,14 +369,16 @@ export default function Home() {
                 </Box>
               )}
 
-              {/* AI 分析报告 */}
+              {/* ✅ 修改：AI 分析报告使用 ReactMarkdown 渲染 */}
               {q.aiReasoning && (
                 <Box>
                   <Text size="2" color="gray" mb="2">AI 分析报告</Text>
                   <Card style={{ backgroundColor: "var(--gray-2)", padding: "12px" }}>
-                    <Text size="2" style={{ whiteSpace: "pre-wrap" }}>
-                      {String(q.aiReasoning)}
-                    </Text>
+                    <div className="prose">
+                      <ReactMarkdown>
+                        {String(q.aiReasoning)}
+                      </ReactMarkdown>
+                    </div>
                   </Card>
                 </Box>
               )}
