@@ -68,22 +68,38 @@ async function analyzeWithLLM(
   const prompt = `Analyze the following IP quality data and provide a professional risk assessment report:
 
 IP: ${ip}
-Key Metrics:
-- Fraud Score: ${data.fraudScore || 'N/A'}
-- Abuse Score: ${data.abuseScore || 'N/A'}
-- IP Type: ${data.ipType || 'N/A'}
-- VPN: ${data.isVpn || false}, Proxy: ${data.isProxy || false}, Tor: ${data.isTor || false}
+
+=== IP 本身的风险指标 ===
+- Fraud Score: ${data.fraudScore ?? 'N/A'} (0-100, 越高越危险)
+- Abuse Score: ${data.abuseScore ?? 'N/A'} (0-100, 越高越危险)
+- VPN: ${data.isVpn || false}
+- Proxy: ${data.isProxy || false}
+- Tor: ${data.isTor || false}
 - Hosting/Datacenter: ${data.isHosting || false}
+
+=== ASN 整体风险（不代表此 IP 本身） ===
 - ASN Bot Traffic: ${data.cf_asn_bot_pct ? Number(data.cf_asn_bot_pct).toFixed(1) + '%' : 'N/A'}
+- 注意：ASN Bot 流量高只表示该网络整体有较多自动化流量，不代表此 IP 本身有问题
+
+=== 网络信息 ===
+- IP Type: ${data.ipType || 'N/A'}
 - ISP: ${data.isp || 'N/A'}
 - Country: ${data.countryCode || 'N/A'}
 
-Please provide in Chinese (必须用中文回复):
-1. IP类型判断和网络特征分析
-2. 风险等级评估（低风险/中等风险/高风险）
-3. 建议的使用场景和注意事项
+请用中文回复，包含以下内容：
 
-Keep response concise, around 200-400 words.`;
+1. **IP类型判断**：分析该 IP 的网络特征
+
+2. **风险等级评估**：
+   - IP 本身风险：基于欺诈评分、滥用评分、VPN/代理/Tor 标记
+   - ASN 整体风险：基于 Bot 流量占比（仅供参考，不代表此 IP）
+   - 综合评估：给出最终风险等级（低/中/高）
+
+3. **使用建议**：根据风险等级给出具体建议
+
+重要：如果欺诈评分和滥用评分都很低（<25），即使 ASN Bot 流量高，IP 本身风险也应评为低风险。ASN 数据仅作为参考。
+
+保持回复简洁，200-400字。`;
 
   try {
     console.log(`[LLM] 调用 API: ${LLM_BASE_URL}/chat/completions, Model: ${LLM_MODEL}`);
