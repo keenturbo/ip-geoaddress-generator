@@ -427,30 +427,31 @@ export default class WFDService {
       errors.push(`Nominatim: ${error instanceof Error ? error.message : 'unknown'}`);
     }
 
-    // API 3: geocode.xyz (备用)
+    // API 3: Photon (Komoot) - 替换了 geocode.xyz
     try {
-      console.log(`尝试备用API (geocode.xyz): ${randomLat}, ${randomLon}`);
-      const url = `https://geocode.xyz/${randomLat},${randomLon}?geoit=json`;
+      console.log(`尝试备用API (Photon): ${randomLat}, ${randomLon}`);
+      const url = `https://photon.komoot.io/reverse?lon=${randomLon}&lat=${randomLat}`;
       const response = await this.fetchWithTimeout(url, 10000);
       if (response.ok) {
         const data = await response.json();
-        if (data.city || data.state || data.country) {
-          console.log("✅ 地址获取成功 (geocode.xyz)");
+        if (data.features && data.features.length > 0) {
+          const props = data.features[0].properties;
+          console.log("✅ 地址获取成功 (Photon)");
           return {
-            road: data.staddress || data.stnumber || "",
-            city: data.city || "",
-            state: data.state || data.region || "",
-            postcode: data.postal || "",
-            country: data.country || "",
-            country_code: data.prov?.toLowerCase() || "",
+            road: `${props.housenumber || ""} ${props.street || ""}`.trim() || props.name || "",
+            city: props.city || props.town || props.village || "",
+            state: props.state || props.county || "",
+            postcode: props.postcode || "",
+            country: props.country || "",
+            country_code: props.countrycode?.toLowerCase() || "",
           } as Address;
         }
-        errors.push('geocode.xyz: invalid data');
+        errors.push('Photon: no features in response');
       } else {
-        errors.push(`geocode.xyz: HTTP ${response.status}`);
+        errors.push(`Photon: HTTP ${response.status}`);
       }
     } catch (error) {
-      errors.push(`geocode.xyz: ${error instanceof Error ? error.message : 'unknown'}`);
+      errors.push(`Photon: ${error instanceof Error ? error.message : 'unknown'}`);
     }
 
     const errorMsg = `所有地址API都失败了 (坐标: ${latitude}, ${longitude}) - ${errors.join('; ')}`;
