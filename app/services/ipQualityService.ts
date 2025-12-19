@@ -67,19 +67,19 @@ async function analyzeWithLLM(
   }
 
   // 1. 定义系统提示词（专家角色与评分标准）
-    const systemPrompt = `
+  const systemPrompt = `
 # IP Quality Analysis Expert
 
 你是一个专业的IP质量分析专家，负责根据用户提供的IP检测数据，综合分析IP的质量情况并给出使用建议。
 
 ## 分析维度与评分标准
 
-### 1.‌ 基础属性
+### 1.‌‌ 基础属性
 - **IP类型**：ISP/Residential (最优) > Mobile (优秀) > Business (良好) > Data Center/Hosting (一般)
 - **原生/广播**：Native (原生) 优于 Broadcast (广播)
 - **双ISP**：一致 (非双ISP) 优于 不一致 (双ISP)
 
-### 2.‌ 风控评估（按权重排序）
+### 2.‌‌ 风控评估（按权重排序）
 
 #### 高权重指标 (一票否决)
 - **IP2Location Proxy**: 若为 "Yes" 或 Usage Type 为 "VPN/TOR"，直接判定为高风险。
@@ -87,10 +87,10 @@ async function analyzeWithLLM(
 - **Cloudflare Radar**: Bot Score > 50 表示所在 ASN 及其自动化，需警惕。
 
 #### 中权重指标
-- **IPQS Fraud Score**: 75+ (可疑), 85+ (风险), 90+ (高风险)。
+- **Fraud Score**: 75+ (可疑), 85+ (风险), 90+ (高风险)。
 - **AbuseIPDB Score**: >0 即有黑历史，分数越高越危险。
 
-### 3.‌ 输出要求
+### 3.‌‌ 输出要求
 请直接输出 Markdown 格式的报告，不要包含 JSON 包装。请勿使用 Markdown 表格（可能渲染失败），改用列表形式。报告结构如下：
 
 ## IP质量分析报告
@@ -99,7 +99,7 @@ async function analyzeWithLLM(
 
 ### 📊 核心指标评估
 - **IP类型**: [状态图标] [类型] ([原生/广播])
-- **欺诈风险**: [状态图标] IPQS: [分数]
+- **欺诈风险**: [状态图标] Fraud Score: [分数]
 - **威胁标记**: [状态图标] [VPN/Proxy/Tor状态]
 - **滥用记录**: [状态图标] AbuseIPDB: [分数]
 - **邻里环境**: [状态图标] ASN Bot流量: [比例]%
@@ -124,7 +124,7 @@ IP Type: ${data.ipType || 'Unknown'}
 Country: ${data.country || data.countryCode || 'Unknown'}
 
 Risk Data:
-- Fraud Score (IPQS): ${data.fraudScore ?? 'N/A'}
+- Fraud Score: ${data.fraudScore ?? 'N/A'}
 - Abuse Score (AbuseIPDB): ${data.abuseScore ?? 'N/A'}
 - IPData Threats: ${data.isThreat ? 'Detected' : 'None'}
 - VPN: ${data.isVpn ? 'Yes' : 'No'}
@@ -245,6 +245,13 @@ export class IPQualityService {
 
   private buildApis(ip: string): ApiConfig[] {
     return [
+      // ✅ 新增：IPPure (免费，无Key，作为基础数据源)
+      {
+        name: "ippure",
+        url: "https://my.ippure.com/v1/info",
+        enabled: true,
+        transform: (d) => this.transformIPPure(d),
+      },
       {
         name: "ipqs",
         url: `https://www.ipqualityscore.com/api/json/ip/${IPQS_KEY}/${ip}`,
@@ -403,6 +410,20 @@ export class IPQualityService {
     if (data.isVpn === true || data.isProxy === true) return "VPN/Proxy";
     if (data.isTor === true) return "Tor Exit Node";
     return "Residential";
+  }
+
+  // ✅ 新增：IPPure 数据转换
+  private transformIPPure(d: Record<string, unknown>) {
+    return {
+      fraudScore: d.fraudScore,
+      isHosting: d.isResidential === false,
+      countryCode: d.countryCode,
+      region: d.region,
+      city: d.city,
+      isp: d.asOrganization,
+      asn: d.asn ? `AS${d.asn}` : undefined,
+      org: d.asOrganization,
+    };
   }
 
   private transformIPQS(d: Record<string, unknown>) {
